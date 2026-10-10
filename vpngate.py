@@ -44,6 +44,9 @@ WORKER_CHECK_URL = os.environ.get("CHECK_WORKER", "https://你的域名/check?ss
 CONCURRENCY = max(1, int(os.environ.get("CHECK_CONCURRENCY", "32")))
 CHECK_TIMEOUT = float(os.environ.get("CHECK_TIMEOUT", "90"))
 MAX_CHECK_NODES = int(os.environ.get("MAX_CHECK_NODES", "0"))
+MAX_LATENCY_MS = int(os.environ.get("MAX_LATENCY_MS", "4500"))   # 发布延迟上限 (SSTP完整握手口径)
+RECHECK = os.environ.get("RECHECK", "1") == "1"                  # 存活节点复检, 两次通过才发布
+MAX_PER_COUNTRY = int(os.environ.get("MAX_PER_COUNTRY", "12"))   # 每国发布上限 (住宅优先)
 HTTP_TIMEOUT = int(os.environ.get("HTTP_TIMEOUT", "60"))
 PUBLIC_DIR = os.environ.get("PUBLIC_DIR", os.path.join(REPO_DIR, "public"))
 TEMPLATE_HTML = os.path.join(REPO_DIR, "web", "index.html")
@@ -273,20 +276,24 @@ def check_all(nodes, session):
 # ---------------------------------------------------------------------------
 # 生成数据
 # ---------------------------------------------------------------------------
-def build_outputs(results, raw_count, sstp_count, source):
-    available = [r for r in results if r.get("success")]
+def build_outputs(results, raw_count, sstp_count, source, recheck_filtered=0):
+    alive = [r for r in results if r.get("success")]
+    slow = [r for r in alive if (r.get("latency_ms") or 0) > MAX_LATENCY_MS]
+    available = [r for r in alive if (r.get("latency_ms") or 0) <= MAX_LATENCY_MS]
     countries = {}
     for n in available:
         c = n["country"] or "未知"
         countries.setdefault(c, {"code": n["country_code"] or "?", "nodes": []})["nodes"].append(n)
 
-    stats = {"raw_nodes": raw_count, "sstp_nodes": sstp_count, "checked": len(results), "success": len(available), "failed": len(results) - len(available), "countries": len(countries), "residential_est": sum(1 for n in available if n["residential"] == "residential"), "datacenter_est": sum(1 for n in available if n["residential"] == "datacenter")}
+    stats = {"raw_nodes": raw_count, "sstp_nodes": sstp_count, "checked": len(results), "success": len(alive), "recheck_filtered": recheck_filtered, "slow_filtered": len(slow), "published": len(available), "failed": len(results) - len(alive), "countries": len(countries), "residential_est": sum(1 for n in available if n["residential"] == "residential"), "datacenter_est": sum(1 for n in available if n["residential"] == "datacenter")}
     by_country = {}
     for name, grp in countries.items():
+        grp["nodes"].sort(key=lambda n: (0 if n.get("residential") == "residential" else 1, n.get("latency_ms") is None, n.get("latency_ms") or 0, n["host"]))
+        if MAX_PER_COUNTRY > 0:
+            grp["nodes"] = grp["nodes"][:MAX_PER_COUNTRY]
         grp["count"] = len(grp["nodes"])
         grp["residential"] = sum(1 for n in grp["nodes"] if n["residential"] == "residential")
         grp["datacenter"] = sum(1 for n in grp["nodes"] if n["residential"] == "datacenter")
-        grp["nodes"].sort(key=lambda n: (n.get("latency_ms") is None, n.get("latency_ms") or 0, n["host"]))
         by_country[name] = grp
 
     data = {"generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"), "source": source, "worker": WORKER_CHECK_URL, "stats": stats, "countries": by_country, "available": available}
@@ -389,18 +396,38 @@ def main():
     log("CLOUDFLARE WORKER", f"检测失败: {len(failed)}" + (f" (其中 Worker 异常 {len(worker_errors)})" if worker_errors else ""))
     log("CLOUDFLARE WORKER", f"耗时: {elapsed:.1f}s")
 
+    recheck_filtered = 0
+    if RECHECK and success:
+        log("RECHECK", f"复检存活节点: {len(success)} 个 (剔除时好时坏)")
+        second = check_all(success, session)
+        second_map = {f"{r['host']}:{r['port']}": r for r in second}
+        stable = []
+        for r in success:
+            b = second_map.get(f"{r['host']}:{r['port']}")
+            if b and b.get("success"):
+                lat = [x for x in (r.get("latency_ms"), b.get("latency_ms")) if x]
+                if lat:
+                    r["latency_ms"] = min(lat)
+                stable.append(r)
+            else:
+                recheck_filtered += 1
+        log("RECHECK", f"复检通过: {len(stable)} | 复检剔除: {recheck_filtered}")
+        success = stable
+        results = stable + failed
+
     if uniq and not success and len(worker_errors) == len(uniq):
         die("Worker 全部请求异常, 检测服务不可用 — 本次运行判定失败 (不生成空结果)")
 
-    data = build_outputs(results, raw_count, sstp_count, source)
-    log("RESULT", f"可用节点: {len(success)}")
+    data = build_outputs(results, raw_count, sstp_count, source, recheck_filtered)
+    log("RESULT", f"检测可用: {data['stats']['success']} (复检剔除 {recheck_filtered}, 高延迟剔除 {data['stats']['slow_filtered']})")
+    log("RESULT", f"最终发布: {data['stats']['published']}")
     log("RESULT", f"国家数量: {data['stats']['countries']}")
 
     data_path, html_path, nodes_path = write_outputs(data)
     log("WEBSITE", f"生成 {os.path.relpath(data_path, REPO_DIR)}")
     log("WEBSITE", f"生成 {os.path.relpath(html_path, REPO_DIR)}")
     log("WEBSITE", f"生成 {os.path.relpath(nodes_path, REPO_DIR)}")
-    log("USAGE", f"自动轮换: 把 {NODES_URL} 填入 edgetunnel 后台「自定义优选IP」框 (一次配置, 之后每 30 分钟自动更新)")
+    log("USAGE", f"自动轮换: 把 {NODES_URL} 填入 edgetunnel 后台「自定义优选IP」框 (一次配置, 之后每 10 分钟自动更新)")
     log("WEBSITE", "完成 (GitHub Pages 部署由 workflow 执行)")
 
 if __name__ == "__main__":
