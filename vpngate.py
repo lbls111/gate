@@ -304,7 +304,7 @@ EDGE_HOSTS = [
     if h.strip()
 ]
 
-NODES_URL = os.environ.get("NODES_URL", "https://YOUR_GITHUB_USERNAME.github.io/gate/nodes.txt")
+NODES_URL = os.environ.get("NODES_URL", "https://lbls111.github.io/gate/nodes.txt")
 
 def build_nodes_text(data):
     """生成纯节点行版本 (无注释): 每行 = 入口地址#名字$sstp://..."""
@@ -410,3 +410,4 @@ if __name__ == "__main__":
         raise
     except Exception as exc:
         die(f"程序异常: {type(exc).__name__}: {exc}")
+
