@@ -2,7 +2,8 @@ name: VPN Gate Node Check
 
 on:
   schedule:
-    - cron: "*/30 * * * *"
+    # 候选池 5 分钟一轮 (rotator Worker 每分钟只碰当前集, 这里只刷新候选)
+    - cron: "*/5 * * * *"
   workflow_dispatch:
 
 permissions:
