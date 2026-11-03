@@ -55,6 +55,9 @@ DATA_CENTER_ORG_KEYWORDS = [
     "GOOGLE", "AMAZON", "AWS", "MICROSOFT", "OVH", "HETZNER", "DIGITALOCEAN",
     "AKAMAI", "CLOUDFLARE", "FASTLY", "RACKSPACE", "EQUINIX", "LINODE", "VULTR",
     "HURRICANE", "TENCENT", "ALIBABA", "ALIYUN", "LEASWEB",
+    # VPN Gate 自有中继段 (AS36599 SoftEther Telecommunication Research Institute),
+    # ipinfo 常把 is_datacenter 判为 false，但它是机房/中继而非家宽，必须剔除。
+    "SOFTETHER",
 ]
 RESIDENTIAL_ORG_KEYWORDS = [
     "NTT EAST", "NTT WEST", "NTT COMMUNICATIONS", "NTT BROADBAND", "KDDI", "DOCOMO",
@@ -218,11 +221,13 @@ def dedupe(nodes):
 # 检测 Worker
 # ---------------------------------------------------------------------------
 def classify_network(host, exit_org, is_datacenter=None):
-    if is_datacenter is True: return "datacenter"
-    if is_datacenter is False: return "residential"
+    # 判定顺序: 机房关键词优先于 is_datacenter=false, 避免 VPN Gate 自有中继
+    # (AS36599 SoftEther, 常被 ipinfo 标成 is_datacenter=false) 混进住宅池。
     org = (exit_org or "").upper()
+    if is_datacenter is True: return "datacenter"
+    if org and any(k in org for k in DATA_CENTER_ORG_KEYWORDS): return "datacenter"
+    if is_datacenter is False: return "residential"
     if org:
-        if any(k in org for k in DATA_CENTER_ORG_KEYWORDS): return "datacenter"
         if any(k in org for k in RESIDENTIAL_ORG_KEYWORDS): return "residential"
     h = host.lower()
     if h.startswith("public-vpn"): return "datacenter"
@@ -280,12 +285,19 @@ def build_outputs(results, raw_count, sstp_count, source, recheck_filtered=0):
     alive = [r for r in results if r.get("success")]
     slow = [r for r in alive if (r.get("latency_ms") or 0) > MAX_LATENCY_MS]
     available = [r for r in alive if (r.get("latency_ms") or 0) <= MAX_LATENCY_MS]
+    # 纯净度过滤规则 (产出端唯一出口, 下游 rotator 直接消费 data.json):
+    # 1) 必须 check-sstp 实测 success 且延迟 <= MAX_LATENCY_MS;
+    # 2) exit.is_datacenter == True 一律剔除;
+    # 3) ASN/org 命中机房关键词 (含 AS36599 SoftEther 中继) 也剔除;
+    # 4) 仅保留 ISP/住宅段 (residential), unknown 不进 nodes.txt 但保留在 data.json 便于排查。
+    datacenter_dropped = [r for r in available if r.get("residential") == "datacenter"]
+    available = [r for r in available if r.get("residential") != "datacenter"]
     countries = {}
     for n in available:
         c = n["country"] or "未知"
         countries.setdefault(c, {"code": n["country_code"] or "?", "nodes": []})["nodes"].append(n)
 
-    stats = {"raw_nodes": raw_count, "sstp_nodes": sstp_count, "checked": len(results), "success": len(alive), "recheck_filtered": recheck_filtered, "slow_filtered": len(slow), "published": len(available), "failed": len(results) - len(alive), "countries": len(countries), "residential_est": sum(1 for n in available if n["residential"] == "residential"), "datacenter_est": sum(1 for n in available if n["residential"] == "datacenter")}
+    stats = {"raw_nodes": raw_count, "sstp_nodes": sstp_count, "checked": len(results), "success": len(alive), "recheck_filtered": recheck_filtered, "slow_filtered": len(slow), "datacenter_filtered": len(datacenter_dropped), "published": len(available), "failed": len(results) - len(alive), "countries": len(countries), "residential_est": sum(1 for n in available if n["residential"] == "residential"), "datacenter_est": sum(1 for n in available if n["residential"] == "datacenter")}
     by_country = {}
     for name, grp in countries.items():
         grp["nodes"].sort(key=lambda n: (0 if n.get("residential") == "residential" else 1, n.get("latency_ms") is None, n.get("latency_ms") or 0, n["host"]))
