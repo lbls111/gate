@@ -44,7 +44,7 @@ WORKER_CHECK_URL = os.environ.get("CHECK_WORKER", "https://你的域名/check?ss
 CONCURRENCY = max(1, int(os.environ.get("CHECK_CONCURRENCY", "32")))
 CHECK_TIMEOUT = float(os.environ.get("CHECK_TIMEOUT", "90"))
 MAX_CHECK_NODES = int(os.environ.get("MAX_CHECK_NODES", "0"))
-MAX_LATENCY_MS = int(os.environ.get("MAX_LATENCY_MS", "4500"))   # 发布延迟上限 (SSTP完整握手口径)
+MAX_LATENCY_MS = int(os.environ.get("MAX_LATENCY_MS", "6000"))   # 发布延迟上限 (SSTP完整握手口径)
 RECHECK = os.environ.get("RECHECK", "1") == "1"                  # 存活节点复检, 两次通过才发布
 MAX_PER_COUNTRY = int(os.environ.get("MAX_PER_COUNTRY", "12"))   # 每国发布上限 (住宅优先)
 HTTP_TIMEOUT = int(os.environ.get("HTTP_TIMEOUT", "60"))
